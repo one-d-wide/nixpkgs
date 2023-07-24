@@ -2,7 +2,7 @@
 
 with lib;
 let
-  # Simular to types.enum of `attrNames attrset` but maps merged result to `attrset.${value}`
+  # Similar to types.enum of `attrNames attrset` but maps merged result to `attrset.${value}`
   attrEnum = attrset:
     types.enum (attrNames attrset) // {
       merge = loc: defs: attrset.${mergeEqualOption loc defs};
@@ -143,7 +143,7 @@ in
                 default = null;
                 description = mdDoc ''
                   Set a router bandwidth limit: integer in KBps or alias.
-                  Note that integer bandwith will be rounded.
+                  Note that integer bandwidth will be rounded.
                   If not set, {command}`i2pd` defaults to `32KBps`.
                 '';
               };
@@ -162,7 +162,7 @@ in
           };
           example = ''
             {
-              meshnets.yggdrasil = true; # Enable yggdrassil network support
+              meshnets.yggdrasil = true; # Enable yggdrasil network support
             }
           '';
         };
@@ -186,7 +186,7 @@ in
               description = mdDoc "Port of server tunnel (on this port i2pd will send data from I2P)";
             };
             inherit (templates) signaturetype;
-          } // templates.i2cp;
+          } // { inherit (templates) i2cp; };
         });
         default = { };
       };
@@ -210,7 +210,7 @@ in
               description = mdDoc "Remote endpoint, I2P hostname or b32.i2p address";
             };
             inherit (templates) signaturetype;
-          } // templates.i2cp;
+          } // { inherit (templates) i2cp; };
         });
         default = { };
       };
@@ -260,7 +260,7 @@ in
       cfg = config.services.i2pd;
 
       /* Configuration generator
-      *  Simular to `pkgs.formats.ini`, but with few distinctions:
+      *  Similar to `pkgs.formats.ini`, but with few distinctions:
       *   * Out-of-section options are allowed and printed on top of a file.
       *   * Nested sub-values (`a.b.c = ...`) coerced to (`"a.b.c" = ...`).
       */
@@ -353,14 +353,22 @@ in
           ExecStartPre =
             "${pkgs.writeShellScriptBin "i2pd-load-credentials"
               ''
-                set -e -o errexit -o pipefail -o nounset -o errtrace
-                ids=($(ls "$CREDENTIALS_DIRECTORY"))
+                set -o errexit -o nounset
+
+                # If no credential declared, `CREDENTIALS_DIRECTORY` is unset
+                ids=(${"$"}{CREDENTIALS_DIRECTORY:+$(ls "$CREDENTIALS_DIRECTORY")})
+
                 # For every cli argument
-                for arg in $@; do
+                for arg in "$@"; do
                   # Split argument at "=", assign first part to `out` and second part to `in`
-                  arg=(${"$"}{arg//=/ }); out="${"$"}{arg[0]}"; in="${"$"}{arg[1]}"
-                  # Clone file, assign permissions
-                  cp "$in" "$out"; chmod u=rw,g=,o= "$out"
+                  arg=(${"$"}{arg//=/ })
+                  out="${"$"}{arg[0]}"
+                  in="${"$"}{arg[1]}"
+
+                  # Copy file, set permissions
+                  cp "$in" "$out"
+                  chmod u=rw,g=,o= "$out"
+
                   # Try substitute all known credentials
                   for id in "${"$"}{ids[@]}"; do
                     ${pkgs.replace-secret}/bin/replace-secret ${credential.start}"$id"${credential.stop} "$CREDENTIALS_DIRECTORY/$id" "$out"
