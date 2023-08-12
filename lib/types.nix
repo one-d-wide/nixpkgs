@@ -24,18 +24,25 @@ let
     count
     elemAt
     filter
+    findFirst
     foldl'
     head
     imap1
     last
     length
+    optional
+    subtractLists
     tail
     ;
   inherit (lib.attrsets)
+
     attrNames
+    catAttrs
     filterAttrs
     hasAttr
     mapAttrs
+    mapAttrsToList
+    nameValuePair
     optionalAttrs
     zipAttrsWith
     ;
@@ -816,45 +823,138 @@ rec {
         };
       };
 
-    # A value from a set of allowed ones.
+    nothing = mkOptionType rec {
+      name = "nothing";
+      description = "nothing";
+      descriptionClass = "noun";
+      check = value: false;
+      merge = loc: defs:
+        throw "The option `${showOption loc}' is nothing and can't be merged, in ${showFiles (getFiles defs)}.";
+      functor = (defaultFunctor name) // { type = nothing; };
+    };
+
+    coercedTo = coercedType: coerceFunc: finalType:
+      assert isFunction coerceFunc;
+      enumWith { inherit coercedType coerceFunc finalType; } [];
+
     enum = values:
+      assert lib.assertMsg (isList values)
+        "enum: `values` must be a list";
+      enumWith
+        { finalType = nothing; }
+        (map (v: { output = v; input = v; }) (lib.unique values));
+
+    enumAttrs = args: mapping:
+      enumWith
+        args
+        (mapAttrsToList (k: v: { input = k; output = v; }) mapping);
+
+    enumWith = flip (
+      mapping:
+      { coercedType ? anything
+      , coerceFunc ? null
+      , finalType ? enum (catAttrs "output" mapping)
+      }:
       let
-        inherit (lib.lists) unique;
+        inputs = catAttrs "input" mapping;
+
+        find = value: findFirst (v: v.input == value) { } mapping;
+
+        # Description
         show = v:
-               if builtins.isString v then ''"${v}"''
+          if builtins.isString v then ''"${v}"''
           else if builtins.isInt v then builtins.toString v
           else if builtins.isBool v then boolToString v
           else ''<${builtins.typeOf v}>'';
-      in
-      mkOptionType rec {
-        name = "enum";
-        description =
-          # Length 0 or 1 enums may occur in a design pattern with type merging
-          # where an "interface" module declares an empty enum and other modules
-          # provide implementations, each extending the enum with their own
-          # identifier.
-          if values == [] then
-            "impossible (empty enum)"
-          else if builtins.length values == 1 then
-            "value ${show (builtins.head values)} (singular enum)"
+        showMapping = v:
+          if finalType.name == "nothing" then
+            show v.input
           else
-            "one of ${concatMapStringsSep ", " show values}";
+            "${show v.input}(${show v.output})";
+        wrapIfNot = enum: optionDescriptionPhrase (flip elem enum);
+        coercionDescription =
+          optional (finalType.name != "nothing")
+            (if isNull coerceFunc then
+              "${wrapIfNot [ "noun" "conjunction" ] finalType}"
+            else
+              "${wrapIfNot [ "noun" ] finalType} or ${wrapIfNot [ "noun" ] coercedType} convertible to it");
+        mappingDescription =
+          optional (mapping != [ ])
+            (concatStringsSep " " [
+              (if length mapping == 1
+              then "value"
+              else "one of")
+              (concatMapStringsSep
+                ", "
+                showMapping
+                mapping)
+            ]);
+      in
+      assert lib.assertMsg (isList mapping)
+        "enumWith: Mapping must be a list";
+      assert lib.assertMsg (all (v: v ? input && v ? output) mapping)
+        "enumWith: Some of provided mappings missing `input` or `output` attribute";
+      assert lib.assertMsg (inputs == lib.unique inputs)
+        "enumWith: Some of the mappings are duplicated";
+      assert lib.assertMsg (coercedType.getSubModules == null)
+        "enumWith: coercedType must not have submodules (it’s a ${coercedType.description})";
+      mkOptionType rec {
+        name = "enumWith";
+        description =
+          if coercionDescription ++ mappingDescription == [ ]
+          then "nothing (empty enum)"
+          else concatStringsSep ", or " (coercionDescription ++ mappingDescription);
         descriptionClass =
-          if builtins.length values < 2
-          then "noun"
-          else "conjunction";
-        check = flip elem values;
-        merge = mergeEqualOption;
-        functor = (defaultFunctor name) // { payload = values; binOp = a: b: unique (a ++ b); };
-      };
-
-    # Similar to `enum (attrNames mapping)` but merges to `mapping.${name}`
-    enumMap = mapping:
-      enum (attrNames mapping) // rec {
-        name = "enumMap";
-        merge = loc: defs: mapping.${mergeEqualOption loc defs};
-        functor = (defaultFunctor name) // { type = enumMap; payload = mapping; binOp = a: b: a // b; };
-      };
+          if coercionDescription != [ ] then null
+          else if length mapping < 2 then "noun"
+          else "composite";
+        # TODO: Check generated documentation
+        emptyValue = finalType.emptyValue;
+        getSubOptions = finalType.getSubOptions;
+        getSubModules = finalType.getSubModules;
+        substSubModules = m: coercedTo coercedType coerceFunc (finalType.substSubModules m);
+        nestedTypes.coercedType = coercedType;
+        nestedTypes.finalType = finalType;
+        check = x:
+          elem x (catAttrs "input" mapping)
+          || finalType.check x
+          || (! isNull coerceFunc && coercedType.check x && finalType.check (coerceFunc x));
+        merge = loc: defs:
+          let
+            coerce = value: if finalType.check value then value else coerceFunc value;
+            fill = def: value: [ (def // { inherit value; }) ];
+            f = a: { value, ... }@def:
+              if elem value inputs
+              then a // { mapped = a.mapped ++ fill def (find value).output; }
+              else a // { coerced = a.coerced ++ fill def (coerce def.value); };
+            defs' = foldl' f { coerced = [ ]; mapped = [ ]; } defs;
+          in
+          if defs'.mapped != [ ] then
+            mergeEqualOption loc (defs'.mapped ++ defs'.coerced)
+          else
+            finalType.merge loc defs'.coerced;
+        functor = (defaultFunctor name) // {
+          type = enumWith;
+          wrapped = { inherit coercedType coerceFunc finalType; };
+          payload = mapping;
+        };
+        typeMerge = other:
+          let
+            self = functor;
+            finalType = self.wrapped.finalType.typeMerge other.wrapped.finalType.functor;
+          in
+          if self.name != other.name then null
+          else if
+            # Types have identical `coercedType` and `coerceFunc` is null
+            removeAttrs self.wrapped [ "finalType" ] == removeAttrs other.wrapped [ "finalType" ]
+            # Mappings can be merged without an overlap
+            && inputs == subtractLists (catAttrs "input" other.payload) inputs
+            # Final types can be merged
+            && ! isNull finalType
+          then self.type (self.wrapped // { inherit finalType; }) (self.payload ++ other.payload)
+          else null;
+      }
+    );
 
     # Either value of type `t1` or `t2`.
     either = t1: t2: mkOptionType rec {
@@ -890,31 +990,6 @@ rec {
         tail' = tail ts;
       in foldl' either head' tail';
 
-    # Either value of type `coercedType` or `finalType`, the former is
-    # converted to `finalType` using `coerceFunc`.
-    coercedTo = coercedType: coerceFunc: finalType:
-      assert lib.assertMsg (coercedType.getSubModules == null)
-        "coercedTo: coercedType must not have submodules (it’s a ${
-          coercedType.description})";
-      mkOptionType rec {
-        name = "coercedTo";
-        description = "${optionDescriptionPhrase (class: class == "noun") finalType} or ${optionDescriptionPhrase (class: class == "noun") coercedType} convertible to it";
-        check = x: (coercedType.check x && finalType.check (coerceFunc x)) || finalType.check x;
-        merge = loc: defs:
-          let
-            coerceVal = val:
-              if coercedType.check val then coerceFunc val
-              else val;
-          in finalType.merge loc (map (def: def // { value = coerceVal def.value; }) defs);
-        emptyValue = finalType.emptyValue;
-        getSubOptions = finalType.getSubOptions;
-        getSubModules = finalType.getSubModules;
-        substSubModules = m: coercedTo coercedType coerceFunc (finalType.substSubModules m);
-        typeMerge = t1: t2: null;
-        functor = (defaultFunctor name) // { wrapped = finalType; };
-        nestedTypes.coercedType = coercedType;
-        nestedTypes.finalType = finalType;
-      };
 
     # Augment the given type with an additional type check function.
     addCheck = elemType: check: elemType // { check = x: elemType.check x && check x; };
